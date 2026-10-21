@@ -1,0 +1,277 @@
+﻿
+using Seedunk.Net.IModels;
+using Seedunk.Net.Models;
+ 
+using Seedunk.Net.Util;
+using System; 
+using System.Collections.Generic;
+using System.Data;
+using System.Diagnostics;
+  
+using System.Text.RegularExpressions;
+ 
+
+namespace Seedunk.Net
+{
+
+    public delegate string IColumnNameParser(string sql);
+    
+    public abstract class DataBase<T1>  :IModelData<T1> where T1:class,IModel
+    { 
+        private T1 Model;
+        public DataBase() {
+            Model = (T1)Activator.CreateInstance(typeof(T1)); 
+        }
+
+        public abstract ResultResponse Connect(Dictionary<string, object> ConnectArgs);
+        public abstract ResultResponse Disonnect();
+        public abstract AffectedResponse ExecuteNonQuery(string sql, Dictionary<string, object> Parameters = null);
+        public abstract ObjectResponse ExecuteScalar(string sql, Dictionary<string, object> Parameters = null);
+        public abstract QueryResponse GetDataTable(string sql, Dictionary<string, object> Parameters = null);
+
+
+        
+        #region 可被重载的方法
+        public virtual string ColumnNameParser(string name) {
+            
+            return Regex.Replace(name, "([A-Z])", "_$1").ToLower().TrimStart('_');
+        }
+        #endregion
+
+        
+        
+        public bool TryQueryRow(string sql, out Dictionary<string, object> row)
+        {
+            QueryResponse res =  GetDataTable(sql);
+            List<T1> rows = new List<T1>();
+            if (res.Rows.Count == 1)
+            {
+                row = ModelUtil<DataRow>.ToDictionary(res.Rows[0]);
+                return true;
+            }
+            else
+            {
+                row = null;
+                return false;
+            }
+        }
+          
+        public int QueryCount(Dictionary<string, object> where) {
+            string whereSql = where == null ? "" : (" where " +  where.ToAndSQL());
+            var res =  GetDataTable("select count(0) as 'count' from " + Model.ModelName + whereSql);
+            if (res.IsSuccess && res.Rows.Count > 0)
+            {
+                return int.Parse(Convert.ToString(res.Rows[0]["count"]));
+            }
+            else return 0;
+        }
+
+       
+  
+        public List<T1> QueryResult(Dictionary<string, object> where, Dictionary<string, string> orderBys, int limit, int span)
+        {
+            string whereSql = where == null ? "" : (" where " + where.ToAndSQL());
+            if (orderBys != null) {
+                whereSql += orderBys.ToOrderSQL(); 
+            } 
+            return QueryResult("select * from " + Model.ModelName + whereSql + " limit " + limit + "," + span + ";");
+        }
+       
+        public List<T1> QueryResult(string sql) {
+            sql = sql.Replace("{TableName}", Model.ModelName);
+            Debug.WriteLine("QueryResult: " + sql); 
+            QueryResponse res =  GetDataTable(sql);
+            List<T1> rows = new List<T1>();
+            for (int i = 0; i < res.Rows.Count; i++) { 
+                Dictionary<string, object> kv = ModelUtil<DataRow>.ToDictionary(res.Rows[i]);
+                T1 model = (T1)Activator.CreateInstance(typeof(T1));
+                ((IModel)model).BindDictionary(kv); 
+                rows.Add(model); 
+            }
+            return rows;
+        }
+        
+        public virtual bool TryGetByPrimaryValue(string value, out T1 row)
+        {
+            string sql = "select * from " + Model.ModelName + " where " + Model.PrimaryPropertyName + "='" + value + "';";
+            // Debug.WriteLine("TryGetByPrimaryValue: " + sql);            
+            var res =  GetDataTable(sql); 
+            if (res.Rows.Count == 1)
+            {
+                Dictionary<string, object>  kv= ModelUtil<DataRow>.ToDictionary(res.Rows[0]); 
+                T1 model = (T1)Activator.CreateInstance(typeof(T1)) ;
+                        ((IModel)model).BindDictionary(kv);
+                row = model;
+                return true;
+            }
+            else {
+                row = default(T1);
+                return false;
+            }
+        }
+        public virtual bool TryGetRow(Dictionary<string,object> wheres, out T1 row)
+        {
+            string whereSql = wheres == null ? "" : (" where " + wheres.ToAndSQL()); 
+            return TryGetRow("select * from " + Model.ModelName + " " + whereSql, out row);
+        }
+        public virtual bool TryGetRow(string sql, out T1 row)
+        {       
+            var res =  GetDataTable(sql);
+            if (res.Rows.Count > 0)
+            {
+                Dictionary<string, object> kv = ModelUtil<DataRow>.ToDictionary(res.Rows[0]);
+                T1 model = (T1)Activator.CreateInstance(typeof(T1));
+                ((IModel)model).BindDictionary(kv);
+                row = model;
+                return true;
+            }
+            else
+            {
+                row = default(T1);
+                return false;
+            }
+        }
+        public bool TryDelete(string val) {
+
+            if (QueryResult("select 0 from " + Model.ModelName + " where " + Model.PrimaryPropertyName + "='" + val + "'").Count == 1)
+            {
+                var res =  ExecuteNonQuery("delete from " + Model.ModelName + " where " + Model.PrimaryPropertyName + "='" + val + "'");
+                return res.IsSuccess && res.Content > 0;
+            }
+            else return false;
+
+        }
+         
+        public bool TryAdd(T1 obj )
+        { 
+                return TryAdd(obj,out string val);
+        }
+
+
+            public bool TryAdd(T1 obj, out T1 newObject)
+            {
+                if (TryAdd(obj, out string newId))
+                {
+
+                if (TryGetByPrimaryValue(newId, out T1 newObject2))
+                {
+                    newObject = newObject2;
+                    return true;
+                }
+                else {
+                    newObject = default(T1);
+
+                    return false;
+                } 
+                  }
+                    else
+            {
+                newObject = default(T1);
+                return false;
+                    }
+         }
+        public bool TryAdd(T1 obj, out string lastId)
+        { 
+            return TryAdd(((IModel)obj).ToDictionary(), out lastId);
+        }
+        public bool TryAdd(Dictionary<string, object> kv,   out string lastId) {
+                lastId = "";
+         
+                List<string> columnNames = new List<string>();
+                List<string> columnValues = new List<string>();
+                List<string> columnValues2 = new List<string>();
+
+                Dictionary<string, object> values = new Dictionary<string, object>();
+                foreach (var property in kv)
+                {
+                     
+                    string columnName = ColumnNameParser(property.Key);
+                    if ( property.Value != null&&!columnName.Equals(Model.PrimaryPropertyName)) {
+                            columnNames.Add(columnName);
+                            columnValues.Add("@"+columnName); 
+                            values.Add(columnName, property.Value ); 
+                            columnValues2.Add("'"+Convert.ToString(property.Value) +"'");
+                        }
+                  
+                }
+                string sql = "insert into " + Model.ModelName
+                                + "(" + string.Join(",", columnNames)
+                                + ") values(" + string.Join(",", columnValues) + ")";
+
+            Debug.WriteLine("insert into " + Model.ModelName
+                                + "(" + string.Join(",", columnNames)
+                                + ") values(" + string.Join(",", columnValues2) + ")");
+                var ret =  ExecuteNonQuery(sql , values); 
+                if (ret.IsSuccess && ret.Content > 0)
+                {
+                var idRes =  GetDataTable("select max(" + Model.PrimaryPropertyName + ") as 'LastId' from " + Model.ModelName + " LIMIT 1;");
+                if (idRes.IsSuccess && idRes.Rows.Count == 1)
+                {
+                    lastId = Convert.ToString(idRes.Rows[0]["LastId"]);
+                    return true;
+                }
+                else return false;
+            }
+            else return false;
+         
+        }
+        public bool TryUpdate(T1 obj)
+        {
+            IModel model = obj as IModel; 
+            Dictionary<string, object> kv = model.ToDictionary();
+           
+            List<string> columns = new List<string>(); 
+            string primaryValue = "0";
+
+            Dictionary<string, object> values = new Dictionary<string, object>();
+             
+            foreach (var property in kv)
+            {
+                if (!property.Key.Substring(0, 1).Equals("_"))
+                { 
+                    string columnName = ColumnNameParser(property.Key);
+                    if (property.Value != null && Model.PrimaryPropertyName.Equals(columnName))
+                    {
+                        primaryValue = Convert.ToString(property.Value);
+                    } 
+                    else if (property.Value != null)
+                    {
+                    columns.Add(columnName + "=@" + columnName);
+                        values.Add(columnName, property.Value);
+                    }
+                }
+            }
+            string sql = "update " + Model.ModelName  + " set "+ string.Join(",", columns)
+                         + " where "+Model.PrimaryPropertyName+"= '"+ primaryValue  + "';"; 
+            Debug.WriteLine("SQL Update: " + sql);
+
+            var ret =  ExecuteNonQuery(sql, values);
+            return ret.IsSuccess && ret.Content > 0;
+        }
+
+        public bool TryGet(Dictionary<string, object> wheres, out T1 row)
+        {
+            throw new NotImplementedException();
+        }
+
+        public int GetCount(Dictionary<string, object> where)
+        {
+            throw new NotImplementedException();
+        }
+
+        public List<T1> GetResult(Dictionary<string, object> where, Dictionary<string, string> orderBys, int limit, int span)
+        {
+            throw new NotImplementedException();
+        }
+
+        public bool TryAdd<T2>(T1 obj, out T2 lastId)
+        {
+            throw new NotImplementedException();
+        }
+
+        public bool TryDelete(T1 obj)
+        {
+            throw new NotImplementedException();
+        }
+    }
+}
